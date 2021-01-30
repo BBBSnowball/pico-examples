@@ -5,3 +5,15 @@ cmake-*
 build
 .DS_Store
 *.pdf
+CMakeFiles/
+Makefile/
+Makefile
+cmake_install.cmake
+CMakeCache.txt
+*.dis
+*.bin
+*.elf
+*.elf.map
+*.hex
+*.uf2
+generated/
