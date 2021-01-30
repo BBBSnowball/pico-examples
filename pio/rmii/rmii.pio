@@ -1,0 +1,54 @@
+.define public CLK 9
+.define public CRS 8
+.define public RX1 7
+.define public RX0 6
+
+.program rmii_rx
+.wrap_target
+    wait 0 gpio CRS
+    wait 1 gpio CRS
+
+repeat:
+    // RMII spec says we should sample near the rising edge (setup 4 ns, hold 2ns)
+    // but logic_analyzer program shows that falling edge may be better
+    wait 1 gpio CLK
+    wait 0 gpio CLK
+    in pins, 4
+    jmp pin repeat
+
+    //in null, 4
+    //push
+
+    // We cannot simply push the data because it isn't aligned like the other data and
+    // I don't think there is any way to access the shift count - neither in the PIO
+    // nor the MCU.
+    //FIXME there *must* be a better way...
+    in null, 4
+    in null, 4
+    in null, 4
+    in null, 4
+    in null, 4
+    in null, 4
+    in null, 4
+    // We have pushed all data but input shift count is not reset to 0 -> saturate plus auto-push to reset it
+    in null, 32
+
+    irq wait 0
+.wrap
+
+% c-sdk {
+void rmii_rx_program_init(PIO pio, uint sm, uint offset) {
+   pio_gpio_init(pio, RX0);
+   pio_gpio_init(pio, RX1);
+   pio_gpio_init(pio, CRS);
+   pio_gpio_init(pio, CLK);
+   pio_sm_set_consecutive_pindirs(pio, sm, RX0, 4, false);
+   pio_sm_config c = rmii_rx_program_get_default_config(offset);
+   sm_config_set_in_pins(&c, RX0);
+   sm_config_set_in_shift(&c, true, true, 32);
+   sm_config_set_jmp_pin(&c, CRS);
+   sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+   pio_sm_init(pio, sm, offset, &c);
+   pio_sm_set_clkdiv_int_frac(pio, sm, 1, 0);
+}
+%}
