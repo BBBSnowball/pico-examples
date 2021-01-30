@@ -180,11 +180,19 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
       uint32_t src, dst;
     } __attribute__((packed)) *ipframe = (struct _frame*)frame_data;
 
+    static uint32_t ok_cnt = 0, err_cnt = 0, ping_cnt = 0;
     //NOTE values are little-endian so swapped here
     if (crc == frame_fcs && frame_len >= 20 && ipframe->ether_type == 0x0008 && (ipframe->version_ihl&0xf0) == 0x40
         && !(ipframe->flags_fragment&0x4) && ipframe->protocol == 0x01 && ipframe->dst == 0xff012a0a) {
       printf("This is a ping.\r\n");
+      ok_cnt++;
+      ping_cnt++;
+    } else if (crc == frame_fcs) {
+      ok_cnt++;
+    } else {
+      err_cnt++;
     }
+    printf("ok=%lu, err=%lu, pings=%lu\r\n", ok_cnt, err_cnt, ping_cnt);
 }
 
 void init_clock() {
@@ -197,8 +205,8 @@ void init_clock() {
     // Reconfigure PLL sys to 1500 / 5 / 2 = 150MHz
     //pll_init(pll_sys, 1, 1500 * MHZ, 6, 2);
     //pll_init(pll_sys, 1, 1500 * MHZ, 5, 2);
-    //pll_init(pll_sys, 1, 1500 * MHZ, 3, 2);
-    pll_init(pll_sys, 1, 1200 * MHZ, 3, 2);  float freq = 200 * MHZ;
+    pll_init(pll_sys, 1, 1500 * MHZ, 3, 2);  float freq = 250 * MHZ;
+    //pll_init(pll_sys, 1, 1200 * MHZ, 3, 2);  float freq = 200 * MHZ;
     //pll_init(pll_sys, 1, 1200 * MHZ, 6, 2);  float freq = 100 * MHZ;
 
     // CLK SYS = PLL SYS (125MHz) / 1 = 125MHz
