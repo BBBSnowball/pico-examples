@@ -56,7 +56,7 @@ void rmii_rx_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t 
 
 #define TXMON_PIN_BASE TX0
 #define TXMON_PIN_COUNT 8 // must include all TX pins and CLK, i.e. 3 to 9, must probably be a power of 2
-#define TXMON_N_SAMPLES 240 //2048
+#define TXMON_N_SAMPLES 2048
 #define TXMON_WAIT 0
 
 void txmon_init(PIO pio, uint sm) {
@@ -117,32 +117,32 @@ void txmon_print_capture_buf(const uint32_t *buf, uint pin_base, uint pin_count,
     // 01: ____----____----____----
     static int cnt = 0;
     printf("Capture %d:\n", cnt++);
-    for (int sample_start = 0; sample_start < n_samples; sample_start += 80) {
+    for (int sample_start = 0; sample_start < n_samples; sample_start += 96) {
+       if (sample_start > 0) printf("%d:\n", sample_start);
        for (int pin = 0; pin < pin_count; ++pin) {
            printf("%02d: ", pin + pin_base);
-           for (int sample = sample_start; sample < n_samples && sample < sample_start + 80; ++sample) {
+           for (int sample = sample_start; sample < n_samples && sample < sample_start + 96; ++sample) {
                uint bit_index = pin + sample * pin_count;
                bool level = !!(buf[bit_index / 32] & 1u << (bit_index % 32));
                printf(level ? "-" : "_");
            }
            printf("\n");
        }
-       printf("\n");
     }
 }
 
 
 // Frame starts with length and preamble
-//const static size_t tx_frame_preface_length = (32 + 8*8)/8;
-#define tx_frame_preface_length ((32 + 8*8)/8)
+#define tx_frame_preface_length ((32 + 12*8)/8)
 
 // tx_buf must contain tx_frame_preface_length+frame_length bytes, rounded up to whole uint32_t
 void rmii_tx_init_buf(uint32_t* tx_buf, size_t frame_length) {
   // transaction count: four clocks per octet
   tx_buf[0] = (frame_length + tx_frame_preface_length) * 4;
   // preamble and SFD
-  tx_buf[1] = 0x55555555;
+  tx_buf[1] = 0x55555500;
   tx_buf[2] = 0xd5555555;
+  tx_buf[3] = 0xd5555555;
   // clear last word - not strictly necessary as the bits after the frame
   // shouldn't be used by the PIO
   tx_buf[frame_length/4] = 0;
@@ -170,9 +170,11 @@ bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
   intptr_t PIO_BASE = pio == pio0 ? PIO0_BASE : PIO1_BASE;
   volatile uint32_t* PIO_IRQ = (volatile uint32_t*)(PIO_BASE + 0x30);
 
+  static uint offset;
+
   if (!pio_sm_is_enabled(pio, sm)) {
     //FIXME move init code out of here
-    uint offset = pio_add_program(pio, &rmii_tx_program);
+    offset = pio_add_program(pio, &rmii_tx_program);
     rmii_tx_program_init(pio, sm, offset, CLK, TX_EN, TX0);
     printf("tx program is at %d\r\n", offset);
   
@@ -183,7 +185,17 @@ bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
       return false;
   }
 
+  printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
+  pio_sm_set_enabled(pio, sm, false);
   pio_sm_clear_fifos(pio, sm);
+  printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
+  pio_sm_exec(pio, sm, pio_encode_jmp(offset));
+  printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
+
+  printf("jmp: %08x, %08x\r\n", pio_encode_jmp(offset), rmii_tx_program.instructions[rmii_tx_program.length-1]);
+
+  // ack previous irq
+  *PIO_IRQ = 0x2;
 
   dma_channel_config c = dma_channel_get_default_config(dma_chan);
   channel_config_set_read_increment(&c, true);
@@ -199,11 +211,9 @@ bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
 
   printf("number of dma transfers: %lu+1 for %lu clocks plus cnt\r\n", (tx_buf[0]+15)/16, tx_buf[0]);
 
-  //pio_sm_set_enabled(pio, sm, true);
+  printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
 
-  // ack previous irq
-  //FIXME race condition?
-  *PIO_IRQ = 0x2;
+  //pio_sm_set_enabled(pio, sm, true);
 
   return true;
 }
@@ -463,7 +473,8 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
           printf("waiting for tx_mon...\r\n");
           dma_channel_wait_for_finish_blocking(mon_dma_chan);
           txmon_print_capture_buf(mon_buf, TXMON_PIN_BASE, TXMON_PIN_COUNT, TXMON_N_SAMPLES);
-          while (1);
+
+          //while (1);
         }
       }
     } else if (fcs_valid) {

@@ -80,18 +80,19 @@ start:
     // react to it.
     //FIXME compare error rates for different offsets
     //wait 0 pin 0
-    wait 0 gpio CLK
+    wait 1 gpio CLK
     jmp y-- notdone
     jmp done  //FIXME inline this
 notdone:
     //wait 1 pin 0
-    wait 1 gpio CLK
+    wait 0 gpio CLK
     out pins, 2 side 1
 .wrap
 done:
     //wait 1 pin 0
-    wait 1 gpio CLK
-    irq wait 1 side 0
+    wait 0 gpio CLK
+    set pins, 0 side 0
+    irq wait 1
     jmp start
 
 % c-sdk {
