@@ -332,6 +332,9 @@ bool calc_fcs(uint8_t* frame_data, size_t frame_len, bool update) {
     return valid;
 }
 
+bool rmii_tx_can_send2();
+bool rmii_tx_send2(uint32_t* tx_buf);
+
 void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) {
     // Display the capture buffer in text form, like this:
     // 00: __--__--__--__--__--__--
@@ -444,28 +447,10 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
       ok_cnt++;
       ping_cnt++;
 
-      PIO pio = pio0;
-      uint sm = 1;
-      uint dma_chan = 1;
-
-      PIO mon_pio = pio0;
-      uint mon_sm = 2;
-      uint mon_dma_chan = 2;
-
       static uint8_t tx_data[1024 + tx_frame_preface_length + 4];
-      if (!rmii_tx_can_send(pio, sm, dma_chan)) {
+      if (!rmii_tx_can_send2()) {
         tx_drop++;
       } else {
-#if TXMON_ENABLE
-        static uint32_t mon_buf[(TXMON_PIN_COUNT * TXMON_N_SAMPLES + 31) / 32];
-        static bool txmon_initialized = false;
-        if (!txmon_initialized) {
-          txmon_initialized = true;
-          txmon_init(mon_pio, mon_sm);
-        }
-        txmon_arm(mon_pio, mon_sm, mon_dma_chan, mon_buf, sizeof(mon_buf)/sizeof(*mon_buf));
-#endif
-
         //FIXME I think the conversion from uint8_t to uint32_t is only ok for little-endian. Should we check or change that?
         rmii_tx_init_buf((uint32_t*)tx_data, frame_len);
         struct _frame* tx = (struct _frame*)(tx_data + tx_frame_preface_length);
@@ -492,10 +477,49 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         // tcpdump -i ens10f0u1u4 --direction=in
         // ethtool --statistics ens10f0u1u4
         // ethtool --phy-statistics ens10f0u1u4
-        if (!rmii_tx_send(pio, sm, dma_chan, (uint32_t*)tx_data)) {
+        if (!rmii_tx_send2((uint32_t*)tx_data)) {
           tx_drop++;
+        }
+      }
+    } else if (fcs_valid) {
+      ok_cnt++;
+    } else {
+      err_cnt++;
+    }
+    printf("ok=%lu, err=%lu, pings=%lu, tx_drops=%lu\r\n", ok_cnt, err_cnt, ping_cnt, tx_drop);
+}
+
+bool rmii_tx_can_send2() {
+      PIO pio = pio0;
+      uint sm = 1;
+      uint dma_chan = 1;
+
+      return rmii_tx_can_send(pio, sm, dma_chan);
+}
+
+bool rmii_tx_send2(uint32_t* tx_buf) {
+      PIO pio = pio0;
+      uint sm = 1;
+      uint dma_chan = 1;
+
+      PIO mon_pio = pio0;
+      uint mon_sm = 2;
+      uint mon_dma_chan = 2;
+
+#if TXMON_ENABLE
+        static uint32_t mon_buf[(TXMON_PIN_COUNT * TXMON_N_SAMPLES + 31) / 32];
+        static bool txmon_initialized = false;
+        if (!txmon_initialized) {
+          txmon_initialized = true;
+          txmon_init(mon_pio, mon_sm);
+        }
+        txmon_arm(mon_pio, mon_sm, mon_dma_chan, mon_buf, sizeof(mon_buf)/sizeof(*mon_buf));
+#endif
+
+        if (!rmii_tx_send(pio, sm, dma_chan, tx_buf)) {
           dma_channel_abort(mon_dma_chan);
           pio_sm_set_enabled(mon_pio, mon_sm, false);
+          return false;
         } else {
           pio_sm_set_set_pins(pio, sm, 3, 2);
 
@@ -528,7 +552,8 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
             //while (1);
           }
 
-          if (1) {
+          if (0) {
+            const uint8_t* tx_data = (const char*)tx_buf;
             printf("tx buf:");
             for (int j=0; j<32; j++) {
               printf(" %02x", tx_data[j]);
@@ -549,14 +574,9 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
 #endif
 
           //while (1);
+ 
+          return true;
         }
-      }
-    } else if (fcs_valid) {
-      ok_cnt++;
-    } else {
-      err_cnt++;
-    }
-    printf("ok=%lu, err=%lu, pings=%lu, tx_drops=%lu\r\n", ok_cnt, err_cnt, ping_cnt, tx_drop);
 }
 
 void init_clock() {
