@@ -224,10 +224,11 @@ void txmon_print_capture_buf(const uint32_t *buf, uint pin_base, uint pin_count,
 // tx_buf must contain tx_frame_preface_length+frame_length bytes, rounded up to whole uint32_t
 void rmii_tx_init_buf(uint32_t* tx_buf, size_t frame_length) {
   // transaction count: four clocks per octet
-  tx_buf[0] = (frame_length + tx_frame_preface_length) * 4;
+  //NOTE minus 4 because tx_frame_preface_length includes the length word
+  tx_buf[0] = (frame_length + tx_frame_preface_length - 4) * 4;
   // preamble and SFD
   tx_buf[1] = 0x55555500;
-  tx_buf[2] = 0xd5555555;
+  tx_buf[2] = 0x55555555;
   tx_buf[3] = 0xd5555555;
   // clear last word - not strictly necessary as the bits after the frame
   // shouldn't be used by the PIO
