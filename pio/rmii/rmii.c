@@ -29,10 +29,10 @@
 const uint CAPTURE_PIN_COUNT = 4;
 const uint CAPTURE_N_SAMPLES = 2048; //96;
 
-//const uint CLK = 9;
-const uint TX_EN = 5;
-const uint TX0 = 3;
-const uint TX1 = TX0 + 1;
+//#define CLK 9
+#define TX_EN 5
+#define TX0 3
+#define TX1 (TX0 + 1)
 
 void rmii_rx_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t capture_size_words) {
     pio_sm_set_enabled(pio, sm, false);
@@ -52,6 +52,79 @@ void rmii_rx_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t 
 
     pio_sm_set_enabled(pio, sm, true);
 }
+
+
+#define TXMON_PIN_BASE TX0
+#define TXMON_PIN_COUNT 8 // must include all TX pins and CLK, i.e. 3 to 9, must probably be a power of 2
+#define TXMON_N_SAMPLES 2048
+
+void txmon_init(PIO pio, uint sm) {
+    uint pin_base = TXMON_PIN_BASE;
+    uint pin_count = TXMON_PIN_COUNT;
+
+    // Load a program to capture n pins. This is just a single `in pins, n`
+    // instruction with a wrap.
+    uint16_t capture_prog_instr[] = {
+      pio_encode_wait_gpio(true, TX_EN),
+      pio_encode_wait_gpio(false, CLK),
+      pio_encode_wait_gpio(true,  CLK),
+      pio_encode_in(pio_pins, pin_count),
+    };
+    struct pio_program capture_prog = {
+            .instructions = capture_prog_instr,
+            .length = 4,
+            .origin = -1
+    };
+    uint offset = pio_add_program(pio, &capture_prog);
+    printf("txmon program is at %d\r\n", offset);
+
+    // Configure state machine to loop over this `in` instruction forever,
+    // with autopush enabled.
+    pio_sm_config c = pio_get_default_sm_config();
+    sm_config_set_in_pins(&c, pin_base);
+    sm_config_set_wrap(&c, offset+3, offset+3);
+    sm_config_set_clkdiv(&c, 1);
+    sm_config_set_in_shift(&c, true, true, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    pio_sm_init(pio, sm, offset, &c);
+}
+
+void txmon_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t capture_size_words) {
+    pio_sm_set_enabled(pio, sm, false);
+    pio_sm_clear_fifos(pio, sm);
+
+    dma_channel_config c = dma_channel_get_default_config(dma_chan);
+    channel_config_set_read_increment(&c, false);
+    channel_config_set_write_increment(&c, true);
+    channel_config_set_dreq(&c, pio_get_dreq(pio, sm, false));
+
+    dma_channel_configure(dma_chan, &c,
+        capture_buf,        // Destinatinon pointer
+        &pio->rxf[sm],      // Source pointer
+        capture_size_words, // Number of transfers
+        true                // Start immediately
+    );
+
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+void txmon_print_capture_buf(const uint32_t *buf, uint pin_base, uint pin_count, uint32_t n_samples) {
+    // Display the capture buffer in text form, like this:
+    // 00: __--__--__--__--__--__--
+    // 01: ____----____----____----
+    static int cnt = 0;
+    printf("Capture %d:\n", cnt++);
+    for (int pin = 0; pin < pin_count; ++pin) {
+        printf("%02d: ", pin + pin_base);
+        for (int sample = 0; sample < n_samples; ++sample) {
+            uint bit_index = pin + sample * pin_count;
+            bool level = !!(buf[bit_index / 32] & 1u << (bit_index % 32));
+            printf(level ? "-" : "_");
+        }
+        printf("\n");
+    }
+}
+
 
 // Frame starts with length and preamble
 //const static size_t tx_frame_preface_length = (32 + 8*8)/8;
@@ -95,6 +168,7 @@ bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
     //FIXME move init code out of here
     uint offset = pio_add_program(pio, &rmii_tx_program);
     rmii_tx_program_init(pio, sm, offset, CLK, TX_EN, TX0);
+    printf("tx program is at %d\r\n", offset);
   
     pio_sm_set_enabled(pio, sm, false);
   } else {
@@ -279,10 +353,18 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
       uint sm = 1;
       uint dma_chan = 1;
 
+      PIO mon_pio = pio0;
+      uint mon_sm = 2;
+      uint mon_dma_chan = 2;
+
       static uint8_t tx_data[1024 + tx_frame_preface_length + 4];
       if (!rmii_tx_can_send(pio, sm, dma_chan)) {
         tx_drop++;
       } else {
+        static uint32_t mon_buf[(TXMON_PIN_COUNT * TXMON_N_SAMPLES + 31) / 32];
+        txmon_init(mon_pio, mon_sm);
+        txmon_arm(mon_pio, mon_sm, mon_dma_chan, mon_buf, TXMON_N_SAMPLES);
+
         uint8_t our_mac[6] = { 0x02, 0x43, 0x32, 0xb1, 0x67, 0xa7 }; // locally administered, random
         uint32_t our_ip = 0x05012a0a; // 10.42.1.5
         //FIXME I think the conversion from uint8_t to uint32_t is only ok for little-endian. Should we check or change that?
@@ -300,8 +382,15 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         // tcpdump -i ens10f0u1u4 --direction=in
         // ethtool --statistics ens10f0u1u4
         // ethtool --phy-statistics ens10f0u1u4
-        if (!rmii_tx_send(pio, sm, dma_chan, (uint32_t*)tx_data))
+        if (!rmii_tx_send(pio, sm, dma_chan, (uint32_t*)tx_data)) {
           tx_drop++;
+          dma_channel_abort(mon_dma_chan);
+          pio_sm_set_enabled(mon_pio, mon_sm, false);
+        } else {
+          printf("waiting for tx_mon...\r\n");
+          dma_channel_wait_for_finish_blocking(mon_dma_chan);
+          txmon_print_capture_buf(mon_buf, TXMON_PIN_BASE, TXMON_PIN_COUNT, TXMON_N_SAMPLES);
+        }
       }
     } else if (crc == frame_fcs) {
       ok_cnt++;
@@ -422,7 +511,7 @@ int main() {
     init_clock();
 
     stdio_init_all();
-    printf("PIO logic analyser example\n");
+    printf("PIO RMII example\n");
 
     int reneg = 0;
     while (1) {
@@ -512,6 +601,7 @@ int main() {
 
     uint offset = pio_add_program(pio, &rmii_rx_program);
     rmii_rx_program_init(pio, sm, offset);
+    printf("rx program is at %d\r\n", offset);
 
     volatile uint32_t* PIO0_FSTAT = (volatile uint32_t*)(PIO0_BASE + 0x04);
     volatile uint32_t* PIO0_FDEBUG = (volatile uint32_t*)(PIO0_BASE + 0x08);
