@@ -6,6 +6,7 @@ target_sources(rmii PRIVATE
   rmii.c
   $ENV{PICO_EXTRAS_PATH}/src/rp2_common/lwip/lwip_arch.c
   lwip/src/core/inet_chksum.c
+  lwip/src/core/def.c
   zlib/crc32.c)
 
 target_include_directories(rmii PRIVATE
