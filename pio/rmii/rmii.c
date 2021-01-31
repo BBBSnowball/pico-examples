@@ -56,7 +56,7 @@ void rmii_rx_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t 
 
 #define TXMON_PIN_BASE TX0
 #define TXMON_PIN_COUNT 8 // must include all TX pins and CLK, i.e. 3 to 9, must probably be a power of 2
-#define TXMON_N_SAMPLES 80 //2048
+#define TXMON_N_SAMPLES 240 //2048
 #define TXMON_WAIT 0
 
 void txmon_init(PIO pio, uint sm) {
@@ -117,14 +117,17 @@ void txmon_print_capture_buf(const uint32_t *buf, uint pin_base, uint pin_count,
     // 01: ____----____----____----
     static int cnt = 0;
     printf("Capture %d:\n", cnt++);
-    for (int pin = 0; pin < pin_count; ++pin) {
-        printf("%02d: ", pin + pin_base);
-        for (int sample = 0; sample < n_samples; ++sample) {
-            uint bit_index = pin + sample * pin_count;
-            bool level = !!(buf[bit_index / 32] & 1u << (bit_index % 32));
-            printf(level ? "-" : "_");
-        }
-        printf("\n");
+    for (int sample_start = 0; sample_start < n_samples; sample_start += 80) {
+       for (int pin = 0; pin < pin_count; ++pin) {
+           printf("%02d: ", pin + pin_base);
+           for (int sample = sample_start; sample < n_samples && sample < sample_start + 80; ++sample) {
+               uint bit_index = pin + sample * pin_count;
+               bool level = !!(buf[bit_index / 32] & 1u << (bit_index % 32));
+               printf(level ? "-" : "_");
+           }
+           printf("\n");
+       }
+       printf("\n");
     }
 }
 
@@ -372,13 +375,13 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         uint32_t our_ip = 0x05012a0a; // 10.42.1.5
         //FIXME I think the conversion from uint8_t to uint32_t is only ok for little-endian. Should we check or change that?
         rmii_tx_init_buf((uint32_t*)tx_data, frame_len);
-        struct _frame* tx = (struct _frame*)(tx_data + tx_frame_preface_length);
-        memcpy(tx, frame_data, frame_len);
-        memcpy(tx->dmac, tx->smac, 6);
-        memcpy(tx->smac, our_mac, 6);
-        tx->dst = tx->src;
-        tx->src = our_ip;
-        tx->icmp_type = 0; // echo reply
+        //struct _frame* tx = (struct _frame*)(tx_data + tx_frame_preface_length);
+        //memcpy(tx, frame_data, frame_len);
+        //memcpy(tx->dmac, tx->smac, 6);
+        //memcpy(tx->smac, our_mac, 6);
+        //tx->dst = tx->src;
+        //tx->src = our_ip;
+        //tx->icmp_type = 0; // echo reply
         //FIXME header checksum for IP and ICMP
         //FIXME FCS
         // ethtool -K ens10f0u1u4 rx off tx off
@@ -390,28 +393,55 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
           dma_channel_abort(mon_dma_chan);
           pio_sm_set_enabled(mon_pio, mon_sm, false);
         } else {
-          // sanity test: can the txmon see pin changes that we do in the tx sm?
-          printf("DBG_PADOE:  %08lx\r\n", pio->dbg_padoe);
-          printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
-          pio_sm_exec(mon_pio, mon_sm, pio_encode_set(pio_x, 0x05));
-          pio_sm_exec(mon_pio, mon_sm, pio_encode_in(pio_x, 32));
-          printf("txmon: x=5: %08lx\r\n", pio->rxf[mon_sm]);
-          pio_sm_exec(mon_pio, mon_sm, pio_encode_in(pio_pins, 32));
-          printf("txmon: pins=%08lx\r\n", pio->rxf[mon_sm]);
+          pio_sm_set_set_pins(pio, sm, 3, 2);
 
-          for (int j=0; j<32; j++) {
-            pio_sm_exec(pio, sm, pio_encode_set(pio_pins, j));
+          if (0) {
+            dma_channel_abort(dma_chan);
+            printf("tx sm: out_base=%ld, out_count=%ld\r\n",
+                (pio->sm[sm].pinctrl & PIO_SM0_PINCTRL_OUT_BASE_BITS) >> PIO_SM0_PINCTRL_OUT_BASE_LSB,
+                (pio->sm[sm].pinctrl & PIO_SM0_PINCTRL_OUT_COUNT_BITS) >> PIO_SM0_PINCTRL_OUT_COUNT_LSB);
+
+            // sanity test: can the txmon see pin changes that we do in the tx sm?
+            printf("DBG_PADOE:  %08lx\r\n", pio->dbg_padoe);
+            printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
+            pio_sm_exec(mon_pio, mon_sm, pio_encode_set(pio_x, 0x05));
+            pio_sm_exec(mon_pio, mon_sm, pio_encode_in(pio_x, 32));
+            printf("txmon: x=5: %08lx\r\n", pio->rxf[mon_sm]);
             pio_sm_exec(mon_pio, mon_sm, pio_encode_in(pio_pins, 32));
-            printf("txmon: pins=%08lx (set by tx: %02x), DBG_PADOUT=%08lx\r\n", pio->rxf[mon_sm], j, pio->dbg_padout);
+            printf("txmon: pins=%08lx\r\n", pio->rxf[mon_sm]);
+
+            for (int j=0; j<32; j++) {
+              pio_sm_exec(pio, sm, pio_encode_set(pio_pins, j));
+              //pio->txf[sm] = j;
+              //pio_sm_exec(pio, sm, pio_encode_out(pio_pins, 3));
+              pio_sm_exec(mon_pio, mon_sm, pio_encode_in(pio_pins, 32));
+              printf("txmon: pins=%08lx (set by tx: %02x), DBG_PADOUT=%08lx\r\n", pio->rxf[mon_sm], j, pio->dbg_padout);
+            }
+            pio_sm_exec(pio, sm, pio_encode_set(pio_pins, 0));
+            pio_sm_exec(pio, sm, pio_encode_set(pio_pins, 1));
+            printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
+
+            //while (1);
           }
 
-          while (1);
+          if (1) {
+            printf("tx buf:");
+            for (int j=0; j<32; j++) {
+              printf(" %02x", tx_data[j]);
+            }
+            printf(" ...\r\n");
+          }
+
+          memset(mon_buf, 0, sizeof(mon_buf));
 
           // pio_sm_set_enabled for tx and txmon statemachines at the same time
+          txmon_arm(mon_pio, mon_sm, mon_dma_chan, mon_buf, TXMON_N_SAMPLES);
           pio->ctrl |= (1<<sm) | (1<<mon_sm);
+          //pio->ctrl |= (0<<sm) | (1<<mon_sm);
           printf("waiting for tx_mon...\r\n");
           dma_channel_wait_for_finish_blocking(mon_dma_chan);
           txmon_print_capture_buf(mon_buf, TXMON_PIN_BASE, TXMON_PIN_COUNT, TXMON_N_SAMPLES);
+          while (1);
         }
       }
     } else if (crc == frame_fcs) {

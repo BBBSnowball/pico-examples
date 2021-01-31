@@ -70,8 +70,16 @@ repeat:
 .program rmii_tx
 .side_set 1 opt  //FIXME we could make this not optional
 start:
-    pull
+    pull block  // no-op if full because of auto-pull
     mov y, osr
+    //pull block
+    out null, 32  // get next word
+    //set y, 8
+    //set x, 0x15
+    //mov osr, x
+    set pins, 3
+    set pins, 1
+
 .wrap_target
     // Timing is a bit tricky: We may change the data at any point except near the
     // rising edge. However, there is some delay involved before we see the edge and
@@ -79,7 +87,9 @@ start:
     //FIXME compare error rates for different offsets
     //wait 0 pin 0
     wait 0 gpio CLK
-    jmp y-- done
+    jmp y-- notdone
+    jmp done  //FIXME inline this
+notdone:
     //wait 1 pin 0
     wait 1 gpio CLK
     out pins, 2 side 1
@@ -122,7 +132,7 @@ void rmii_tx_program_init(PIO pio, uint sm, uint offset, uint clk, uint tx_en, u
   sm_config_set_out_pins(&c, tx0, 2);
   sm_config_set_out_shift(&c, true, true, 32);
   sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
-  sm_config_set_sideset(&c, 1, true, false);
+  //sm_config_set_sideset(&c, 1, true, false);  //FIXME This seems to break stuff but should be the same as decls above.
   sm_config_set_sideset_pins(&c, tx_en);
   pio_sm_init(pio, sm, offset, &c);
   pio_sm_set_clkdiv_int_frac(pio, sm, 1, 0);
