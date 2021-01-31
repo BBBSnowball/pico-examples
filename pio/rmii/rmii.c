@@ -278,7 +278,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
     int bitcnt = 0;
     int bitcnt2 = 0;
     uint8_t d2 = 0;
-    for (int sample = 0; sample < n_samples && state != end; sample+=8) {
+    for (int sample = 0; sample < n_samples && state != end && state != error; sample+=8) {
       uint32_t d = buf[sample/8];
       for (int i = 0; i < 8; i++) {
         if (!(d & 0x4)) {
@@ -383,8 +383,12 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         tx_drop++;
       } else {
         static uint32_t mon_buf[(TXMON_PIN_COUNT * TXMON_N_SAMPLES + 31) / 32];
-        txmon_init(mon_pio, mon_sm);
-        txmon_arm(mon_pio, mon_sm, mon_dma_chan, mon_buf, TXMON_N_SAMPLES);
+        static bool txmon_initialized = false;
+        if (!txmon_initialized) {
+          txmon_initialized = true;
+          txmon_init(mon_pio, mon_sm);
+        }
+        txmon_arm(mon_pio, mon_sm, mon_dma_chan, mon_buf, sizeof(mon_buf)/sizeof(*mon_buf));
 
         uint8_t our_mac[6] = { 0x02, 0x43, 0x32, 0xb1, 0x67, 0xa7 }; // locally administered, random
         uint32_t our_ip = 0x05012a0a; // 10.42.1.5
@@ -453,7 +457,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
           memset(mon_buf, 0, sizeof(mon_buf));
 
           // pio_sm_set_enabled for tx and txmon statemachines at the same time
-          txmon_arm(mon_pio, mon_sm, mon_dma_chan, mon_buf, TXMON_N_SAMPLES);
+          txmon_arm(mon_pio, mon_sm, mon_dma_chan, mon_buf, sizeof(mon_buf)/sizeof(*mon_buf));
           pio->ctrl |= (1<<sm) | (1<<mon_sm);
           //pio->ctrl |= (0<<sm) | (1<<mon_sm);
           printf("waiting for tx_mon...\r\n");
