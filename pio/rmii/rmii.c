@@ -60,6 +60,8 @@ void rmii_rx_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t 
         true                // Start immediately
     );
 
+    pio->irq = 0x1;  // ack previous interrupt
+ 
     pio_sm_set_enabled(pio, sm, true);
 }
 
@@ -249,14 +251,10 @@ static inline bool pio_sm_is_enabled(PIO pio, uint sm) {
 }
 
 bool rmii_tx_can_send(PIO pio, uint sm, uint dma_chan) {
-  //FIXME replace by pio->xx
-  intptr_t PIO_BASE = pio == pio0 ? PIO0_BASE : PIO1_BASE;
-  volatile uint32_t* PIO_IRQ = (volatile uint32_t*)(PIO_BASE + 0x30);
-
   if (!pio_sm_is_enabled(pio, sm)) {
     return true;
   } else {
-    if (!(*PIO_IRQ & 0x2))
+    if (!(pio->irq & 0x2))
       // IRQ1 is not asserted -> PIO is still busy
       return false;
   }
@@ -308,6 +306,9 @@ bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
 }
 
 bool calc_fcs(uint8_t* frame_data, size_t frame_len, bool update) {
+    if (frame_len <= 4)
+        return false;
+
     uint32_t good_fcs = crc32(0, frame_data, frame_len-4);
 
     //NOTE This is not swapping byte order, on purpose (because of the way the CRC is calculated).
@@ -447,6 +448,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         && !(rxframe->ipv4._offset&0x4) && IPH_PROTO(&rxframe->ipv4) == 0x01 && (rxframe->ipv4.dest.addr == 0xff012a0a || rxframe->ipv4.dest.addr == our_ip)
         && rxframe->icmp_echo.type == ICMP_ECHO && rxframe->icmp_echo.code == 0) {
       printf("This is a ping, seq=%d.\r\n", (frame_data[40] << 8) | frame_data[41]);
+
       ok_cnt++;
       ping_cnt++;
 
@@ -802,7 +804,9 @@ int main() {
       sleep_ms(500);
     }
 
-    uint32_t capture_buf[(CAPTURE_PIN_COUNT * CAPTURE_N_SAMPLES + 31) / 32];
+    uint32_t capture_buf_real1[(CAPTURE_PIN_COUNT * CAPTURE_N_SAMPLES + 31) / 32];
+    uint32_t capture_buf_real2[(CAPTURE_PIN_COUNT * CAPTURE_N_SAMPLES + 31) / 32];
+    uint32_t *capture_buf1 = capture_buf_real1, *capture_buf2 = capture_buf_real2;
 
     PIO pio = pio0;
     uint sm = 0;
@@ -812,38 +816,40 @@ int main() {
     rmii_rx_program_init(pio, sm, offset);
     printf("rx program is at %d\r\n", offset);
 
-    volatile uint32_t* PIO0_FSTAT = (volatile uint32_t*)(PIO0_BASE + 0x04);
-    volatile uint32_t* PIO0_FDEBUG = (volatile uint32_t*)(PIO0_BASE + 0x08);
-    volatile uint32_t* PIO0_IRQ = (volatile uint32_t*)(PIO0_BASE + 0x30);
     volatile uint32_t* DMA0_TRANS_CNT = (volatile uint32_t*)(DMA_BASE + 0x40*dma_chan + 0x008);
 
-    //printf("Arming trigger\n");
+    gpio_init(8);
+    gpio_set_dir(8, GPIO_IN);
+
+    pio->fdebug = 0xffffffff;
+
+    rmii_rx_arm(pio, sm, dma_chan, capture_buf1,
+        (CAPTURE_PIN_COUNT * CAPTURE_N_SAMPLES + 31) / 32);
+
     while (1) {
-
-      gpio_init(8);
-      gpio_set_dir(8, GPIO_IN);
-
-      *PIO0_FDEBUG = 0xffffffff;
-      rmii_rx_arm(pio, sm, dma_chan, capture_buf, //;
-          (CAPTURE_PIN_COUNT * CAPTURE_N_SAMPLES + 31) / 32);
-
-      //FIXME race condition for *very* short frames
-      *PIO0_IRQ = 0x1;  // ack previous interrupt
- 
       // wait for SM to signal end of frame
-      while (!(*PIO0_IRQ & 0x1));
+      while (!(pio->irq & 0x1));
 
       // wait for FIFO empty or DMA done
-      while (!(*PIO0_FSTAT & (1<<8)) && dma_channel_is_busy(dma_chan));
+      while (!(pio->fstat & (1<<8)) && dma_channel_is_busy(dma_chan));
 
       uint32_t n_samples = CAPTURE_N_SAMPLES - *DMA0_TRANS_CNT*8;
 
       dma_channel_abort(dma_chan);
 
-      uint32_t fdebug = *PIO0_FDEBUG;
-      if (fdebug)
+      uint32_t fdebug = pio->fdebug;
+      if (fdebug) {
         printf("FDEBUG: %08lx\r\n", fdebug);
-  
-      print_capture_buf(capture_buf, CAPTURE_PIN_COUNT, n_samples);
+        pio->fdebug = 0xffffffff;
+      }
+
+      uint32_t* tmp = capture_buf1;
+      capture_buf1 = capture_buf2;
+      capture_buf2 = tmp;
+ 
+      rmii_rx_arm(pio, sm, dma_chan, capture_buf2,
+        (CAPTURE_PIN_COUNT * CAPTURE_N_SAMPLES + 31) / 32);
+ 
+      print_capture_buf(capture_buf2, CAPTURE_PIN_COUNT, n_samples);
     }
 }
