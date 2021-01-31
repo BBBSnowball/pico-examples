@@ -281,14 +281,9 @@ bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
       return false;
   }
 
-  printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
   pio_sm_set_enabled(pio, sm, false);
   pio_sm_clear_fifos(pio, sm);
-  printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
   pio_sm_exec(pio, sm, pio_encode_jmp(offset));
-  printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
-
-  printf("jmp: %08x, %08x\r\n", pio_encode_jmp(offset), rmii_tx_program.instructions[rmii_tx_program.length-1]);
 
   // ack previous irq
   *PIO_IRQ = 0x2;
@@ -305,9 +300,7 @@ bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
       true                // Start immediately
   );
 
-  printf("number of dma transfers: %lu+1 for %lu clocks plus cnt\r\n", (tx_buf[0]+15)/16, tx_buf[0]);
-
-  printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
+  //printf("number of dma transfers: %lu+1 for %lu clocks plus cnt\r\n", (tx_buf[0]+15)/16, tx_buf[0]);
 
   //pio_sm_set_enabled(pio, sm, true);
 
@@ -325,7 +318,8 @@ bool calc_fcs(uint8_t* frame_data, size_t frame_len, bool update) {
     bool valid = (good_fcs == frame_fcs);
 
     if (!update) {
-        printf("FCS: expected 0x%lx, actual 0x%lx -> %s\n", good_fcs, frame_fcs, valid ? "ok" : "wrong");
+        if (!valid)
+          printf("FCS: expected 0x%lx, actual 0x%lx -> %s\n", good_fcs, frame_fcs, valid ? "ok" : "wrong");
     } else {
         // dito not swapped, see above
         memcpy(frame_data + frame_len - 4, &good_fcs, 4);
@@ -341,17 +335,19 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
     // Display the capture buffer in text form, like this:
     // 00: __--__--__--__--__--__--
     // 01: ____----____----____----
-    static const char* names[] = { "RX0", "RX1", "CRS", "CLK" };
-    static int cnt = 0;
-    printf("Capture %d:\n", cnt++);
-    for (int pin = 0; pin < pin_count; ++pin) {
-        printf("%s: ", names[pin]);
-        for (int sample = 0; sample < n_samples; ++sample) {
-            uint bit_index = pin + sample * pin_count;
-            bool level = !!(buf[bit_index / 32] & 1u << (bit_index % 32));
-            printf(level ? "-" : "_");
-        }
-        printf("\n");
+    if (0) {
+      static const char* names[] = { "RX0", "RX1", "CRS", "CLK" };
+      static int cnt = 0;
+      printf("Capture %d:\n", cnt++);
+      for (int pin = 0; pin < pin_count; ++pin) {
+          printf("%s: ", names[pin]);
+          for (int sample = 0; sample < n_samples; ++sample) {
+              uint bit_index = pin + sample * pin_count;
+              bool level = !!(buf[bit_index / 32] & 1u << (bit_index % 32));
+              printf(level ? "-" : "_");
+          }
+          printf("\n");
+      }
     }
 
     enum { begin, preamble, frame, end, error } state = begin;
@@ -370,7 +366,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
             state = begin;
           } else {
             state = end;
-            printf("eof\r\n");
+            //printf("eof\r\n");
             break;
           }
         }
@@ -415,13 +411,15 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
 
     if (state == error)
       printf("state=error\r\n");
-    printf("frame, len=%lu + %d bits, %d bits: ", frame_len, bitcnt, bitcnt2);
-    for (int i=0; i<frame_len; i++) {
-      if ((i % 16) == 0)
-        printf("\r\n");
-      printf(" %02x", frame_data[i]);
+    if (0) {
+      printf("frame, len=%lu + %d bits, %d bits: ", frame_len, bitcnt, bitcnt2);
+      for (int i=0; i<frame_len; i++) {
+        if ((i % 16) == 0)
+          printf("\r\n");
+        printf(" %02x", frame_data[i]);
+      }
+      printf("\r\n");
     }
-    printf("\r\n");
 
     bool fcs_valid = calc_fcs(frame_data, frame_len, false);
 
@@ -442,13 +440,13 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
     //NOTE This is recognizing very specific pings. They are generated like this:
     //     ip a add 10.42.1.1/24 dev ens10f0u1u4
     //     ping 10.42.1.255 -bf -I ens10f0u1u4 -s 10  // size can be different
-    static uint32_t ok_cnt = 0, err_cnt = 0, ping_cnt = 0, tx_drop = 0;
+    static uint32_t ok_cnt = 0, err_cnt = 0, ping_cnt = 0, arp_cnt = 0, tx_drop = 0;
     static uint8_t tx_data[1024 + tx_frame_preface_length + 4];
     //NOTE values are little-endian so swapped here
     if (fcs_valid && frame_len >= 20 && rxframe->eth.type == 0x0008 && IPH_V(&rxframe->ipv4) == 0x4
         && !(rxframe->ipv4._offset&0x4) && IPH_PROTO(&rxframe->ipv4) == 0x01 && (rxframe->ipv4.dest.addr == 0xff012a0a || rxframe->ipv4.dest.addr == our_ip)
         && rxframe->icmp_echo.type == ICMP_ECHO && rxframe->icmp_echo.code == 0) {
-      printf("This is a ping.\r\n");
+      printf("This is a ping, seq=%d.\r\n", (frame_data[40] << 8) | frame_data[41]);
       ok_cnt++;
       ping_cnt++;
 
@@ -490,6 +488,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         && *(uint32_t*)&rxframe->arp.dipaddr == our_ip) {
       printf("This is an ARP request.\r\n");
       ok_cnt++;
+      arp_cnt++;
 
       if (!rmii_tx_can_send2()) {
         tx_drop++;
@@ -517,7 +516,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
     } else {
       err_cnt++;
     }
-    printf("ok=%lu, err=%lu, pings=%lu, tx_drops=%lu\r\n", ok_cnt, err_cnt, ping_cnt, tx_drop);
+    printf("ok=%lu, err=%lu, pings=%lu, arps=%lu, tx_drops=%lu\r\n", ok_cnt, err_cnt, ping_cnt, arp_cnt, tx_drop);
 }
 
 bool rmii_tx_can_send2() {
@@ -843,7 +842,9 @@ int main() {
 
       dma_channel_abort(dma_chan);
 
-      printf("FDEBUG: %08lx\r\n", *PIO0_FDEBUG);
+      uint32_t fdebug = *PIO0_FDEBUG;
+      if (fdebug)
+        printf("FDEBUG: %08lx\r\n", fdebug);
   
       print_capture_buf(capture_buf, CAPTURE_PIN_COUNT, n_samples);
     }
