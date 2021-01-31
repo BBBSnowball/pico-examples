@@ -425,9 +425,11 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
 
     struct _frame {
       struct eth_hdr eth;
-      struct ip_hdr ipv4;
       union {
-        struct icmp_echo_hdr icmp_echo;
+        struct {
+          struct ip_hdr ipv4;
+          struct icmp_echo_hdr icmp_echo;
+        };
         struct etharp_hdr arp;
       };
     } __attribute__((packed)) *rxframe = (struct _frame*)(frame_data - ETH_PAD_SIZE);
@@ -439,15 +441,15 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
     //     ip a add 10.42.1.1/24 dev ens10f0u1u4
     //     ping 10.42.1.255 -bf -I ens10f0u1u4 -s 10  // size can be different
     static uint32_t ok_cnt = 0, err_cnt = 0, ping_cnt = 0, tx_drop = 0;
+    static uint8_t tx_data[1024 + tx_frame_preface_length + 4];
     //NOTE values are little-endian so swapped here
     if (fcs_valid && frame_len >= 20 && rxframe->eth.type == 0x0008 && IPH_V(&rxframe->ipv4) == 0x4
-        && !(rxframe->ipv4._offset&0x4) && IPH_PROTO(&rxframe->ipv4) == 0x01 && rxframe->ipv4.dest.addr == 0xff012a0a
+        && !(rxframe->ipv4._offset&0x4) && IPH_PROTO(&rxframe->ipv4) == 0x01 && (rxframe->ipv4.dest.addr == 0xff012a0a || rxframe->ipv4.dest.addr == our_ip)
         && rxframe->icmp_echo.type == ICMP_ECHO && rxframe->icmp_echo.code == 0) {
       printf("This is a ping.\r\n");
       ok_cnt++;
       ping_cnt++;
 
-      static uint8_t tx_data[1024 + tx_frame_preface_length + 4];
       if (!rmii_tx_can_send2()) {
         tx_drop++;
       } else {
@@ -477,6 +479,33 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         // tcpdump -i ens10f0u1u4 --direction=in
         // ethtool --statistics ens10f0u1u4
         // ethtool --phy-statistics ens10f0u1u4
+        if (!rmii_tx_send2((uint32_t*)tx_data)) {
+          tx_drop++;
+        }
+      }
+    } else if (fcs_valid && frame_len >= 20 && rxframe->eth.type == htons(ETHTYPE_ARP) && rxframe->arp.hwtype == htons(0x0001)
+        && rxframe->arp.proto == htons(0x0800) && rxframe->arp.hwlen == 6 && rxframe->arp.protolen == 4 && rxframe->arp.opcode == htons(1)
+        && *(uint32_t*)&rxframe->arp.dipaddr == our_ip) {
+      printf("This is an ARP request.\r\n");
+      ok_cnt++;
+
+      if (!rmii_tx_can_send2()) {
+        tx_drop++;
+      } else {
+        //FIXME I think the conversion from uint8_t to uint32_t is only ok for little-endian. Should we check or change that?
+        rmii_tx_init_buf((uint32_t*)tx_data, frame_len);
+        struct _frame* tx = (struct _frame*)(tx_data + tx_frame_preface_length);
+        memcpy(tx, frame_data, frame_len);
+        memcpy(&tx->eth.dest, &tx->eth.src, 6);
+        memcpy(&tx->eth.src, our_mac, 6);
+
+        tx->arp.opcode = htons(2);
+        memcpy(&tx->arp.dhwaddr, &rxframe->arp.shwaddr, 10);
+        memcpy(&tx->arp.shwaddr, our_mac, 6);
+        *(uint32_t*)&tx->arp.sipaddr = our_ip;
+
+        calc_fcs(tx_data + tx_frame_preface_length, frame_len, true);
+
         if (!rmii_tx_send2((uint32_t*)tx_data)) {
           tx_drop++;
         }
