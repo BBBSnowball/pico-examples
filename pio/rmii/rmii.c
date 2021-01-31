@@ -26,6 +26,10 @@
 
 #include "rmii.pio.h"
 
+#include "lwip/src/include/lwip/prot/ip4.h"
+#include "lwip/inet_chksum.h"
+#include "lwip/icmp.h"
+
 const uint CAPTURE_PIN_COUNT = 4;
 const uint CAPTURE_N_SAMPLES = 2048; //96;
 
@@ -54,6 +58,7 @@ void rmii_rx_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t 
 }
 
 
+#define TXMON_ENABLE 0
 #define TXMON_PIN_BASE TX0
 #define TXMON_PIN_COUNT 8 // must include all TX pins and CLK, i.e. 3 to 9, must probably be a power of 2
 #define TXMON_N_SAMPLES 2048
@@ -193,7 +198,7 @@ void txmon_print_capture_buf(const uint32_t *buf, uint pin_base, uint pin_count,
             printf("state=%d\r\n", state);
             break;
         }
-        printf("%d: %1lx -> %d\r\n", sample+i, d&0xf, state);
+        printf("%d: %1x -> %d\r\n", sample+i, d&0xf, state);
         if (state == frame && bitcnt2 > 0 && bitcnt == 0)
           printf("  byte %ld: %08x\r\n", frame_len-1, frame_data[frame_len-1]);
 
@@ -212,9 +217,7 @@ void txmon_print_capture_buf(const uint32_t *buf, uint pin_base, uint pin_count,
     }
     printf("\r\n");
 
-    bool fcs_valid = calc_fcs(frame_data, frame_len, false);
-
-
+    calc_fcs(frame_data, frame_len, false);
 }
 
 
@@ -479,6 +482,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
       if (!rmii_tx_can_send(pio, sm, dma_chan)) {
         tx_drop++;
       } else {
+#if TXMON_ENABLE
         static uint32_t mon_buf[(TXMON_PIN_COUNT * TXMON_N_SAMPLES + 31) / 32];
         static bool txmon_initialized = false;
         if (!txmon_initialized) {
@@ -486,6 +490,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
           txmon_init(mon_pio, mon_sm);
         }
         txmon_arm(mon_pio, mon_sm, mon_dma_chan, mon_buf, sizeof(mon_buf)/sizeof(*mon_buf));
+#endif
 
         uint8_t our_mac[6] = { 0x02, 0x43, 0x32, 0xb1, 0x67, 0xa7 }; // locally administered, random
         uint32_t our_ip = 0x05012a0a; // 10.42.1.5
@@ -498,7 +503,15 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         tx->dst = tx->src;
         tx->src = our_ip;
         tx->icmp_type = 0; // echo reply
-        //FIXME header checksum for IP and ICMP
+
+        struct ip_hdr* iphdr = (struct ip_hdr*)&tx->version_ihl;
+        IPH_CHKSUM_SET(iphdr, 0);
+        IPH_CHKSUM_SET(iphdr, inet_chksum(iphdr, 20));
+
+        struct icmp_echo_hdr* icmphdr = (struct icmp_echo_hdr *)&tx->icmp_type;
+        icmphdr->chksum = 0;
+        icmphdr->chksum = inet_chksum(icmphdr, frame_len - ((uint8_t*)icmphdr - (uint8_t*)tx) - 4);
+        printf("icmp chksum, length: %d - %d - 4 = %d\r\n", frame_len, ((uint8_t*)icmphdr - (uint8_t*)tx), frame_len - ((uint8_t*)icmphdr - (uint8_t*)tx) - 4);
 
         calc_fcs(tx_data + tx_frame_preface_length, frame_len, true);
         calc_fcs(tx_data + tx_frame_preface_length, frame_len, false);
@@ -551,15 +564,17 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
             printf(" ...\r\n");
           }
 
-          memset(mon_buf, 0, sizeof(mon_buf));
-
+#if TXMON_ENABLE
           // pio_sm_set_enabled for tx and txmon statemachines at the same time
+          memset(mon_buf, 0, sizeof(mon_buf));
           txmon_arm(mon_pio, mon_sm, mon_dma_chan, mon_buf, sizeof(mon_buf)/sizeof(*mon_buf));
           pio->ctrl |= (1<<sm) | (1<<mon_sm);
-          //pio->ctrl |= (0<<sm) | (1<<mon_sm);
           printf("waiting for tx_mon...\r\n");
           dma_channel_wait_for_finish_blocking(mon_dma_chan);
           txmon_print_capture_buf(mon_buf, TXMON_PIN_BASE, TXMON_PIN_COUNT, TXMON_N_SAMPLES);
+#else
+          pio_sm_set_enabled(pio, sm, true);
+#endif
 
           //while (1);
         }
