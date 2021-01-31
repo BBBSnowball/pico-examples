@@ -27,6 +27,7 @@
 
 #include "rmii.pio.h"
 
+#include "lwip/def.h"
 #include "netif/ethernet.h"
 #include "lwip/src/include/lwip/prot/ip4.h"
 #include "lwip/inet_chksum.h"
@@ -318,7 +319,8 @@ bool calc_fcs(uint8_t* frame_data, size_t frame_len, bool update) {
 
     //NOTE This is not swapping byte order, on purpose (because of the way the CRC is calculated).
     //     This will only work for little-endian, I think.
-    uint32_t frame_fcs = *(uint32_t*)(frame_data + frame_len - 4);
+    uint32_t frame_fcs;
+    memcpy(&frame_fcs, frame_data + frame_len - 4, 4);
 
     bool valid = (good_fcs == frame_fcs);
 
@@ -326,7 +328,7 @@ bool calc_fcs(uint8_t* frame_data, size_t frame_len, bool update) {
         printf("FCS: expected 0x%lx, actual 0x%lx -> %s\n", good_fcs, frame_fcs, valid ? "ok" : "wrong");
     } else {
         // dito not swapped, see above
-        *(uint32_t*)(frame_data + frame_len - 4) = good_fcs;
+        memcpy(frame_data + frame_len - 4, &good_fcs, 4);
     }
 
     return valid;
