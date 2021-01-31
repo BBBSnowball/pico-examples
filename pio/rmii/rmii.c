@@ -30,6 +30,8 @@
 #include "lwip/inet_chksum.h"
 #include "lwip/icmp.h"
 
+#include "zlib/zlib.h"
+
 const uint CAPTURE_PIN_COUNT = 4;
 const uint CAPTURE_N_SAMPLES = 2048; //96;
 
@@ -308,50 +310,23 @@ bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
   return true;
 }
 
-#define main x
-#define SCNx8 "c"
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat"
-#include "Ethernet-CRC32/crc32.c"
-#pragma GCC diagnostic pop
-#undef main
-
 bool calc_fcs(uint8_t* frame_data, size_t frame_len, bool update) {
-    cm_t cm;
-    p_cm_t p_cm = &cm;
-    memset(p_cm, 0, sizeof(cm));
+    uint32_t good_fcs = crc32(0, frame_data, frame_len-4);
 
-    p_cm->cm_width  = 32;
-    p_cm->cm_poly   = 0x04C11DB7;
-    p_cm->cm_init   = 0xFFFFFFFF;
-    p_cm->cm_refin  = 1;
-    p_cm->cm_refot  = 1;
-    p_cm->cm_xorot  = 0xFFFFFFFF;
+    //NOTE This is not swapping byte order, on purpose (because of the way the CRC is calculated).
+    //     This will only work for little-endian, I think.
+    uint32_t frame_fcs = *(uint32_t*)(frame_data + frame_len - 4);
 
-    cm_ini(p_cm);
-
-    uint8_t j;
-    for (j = 0; j < frame_len-4 && j < frame_len; j += 1) {
-      cm_nxt(p_cm, frame_data[j]);
-    }
-
-    uint32_t crc = cm_crc(p_cm) & 0xffffffff;
-    uint32_t frame_fcs = (frame_data[frame_len - 1] << 24) |
-                         (frame_data[frame_len - 2] << 16) |
-                         (frame_data[frame_len - 3] << 8) |
-                          frame_data[frame_len - 4];
+    bool valid = (good_fcs == frame_fcs);
 
     if (!update) {
-        printf("Calculated CRC: 0x%lx, Frame FCS: 0x%lx\n", crc, frame_fcs);
-        (crc == frame_fcs) ? printf("Matched!\n") : printf("Not matched!\n");
+        printf("FCS: expected 0x%lx, actual 0x%lx -> %s\n", good_fcs, frame_fcs, valid ? "ok" : "wrong");
     } else {
-        frame_data[frame_len - 1] = crc >> 24;
-        frame_data[frame_len - 2] = crc >> 16;
-        frame_data[frame_len - 3] = crc >>  8;
-        frame_data[frame_len - 4] = crc;
+        // dito not swapped, see above
+        *(uint32_t*)(frame_data + frame_len - 4) = good_fcs;
     }
 
-    return crc == frame_fcs;
+    return valid;
 }
 
 void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) {
