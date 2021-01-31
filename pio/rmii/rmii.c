@@ -822,8 +822,6 @@ int main() {
 
       gpio_init(8);
       gpio_set_dir(8, GPIO_IN);
-      while (!gpio_get(8))
-        ;
 
       *PIO0_FDEBUG = 0xffffffff;
       rmii_rx_arm(pio, sm, dma_chan, capture_buf, //;
