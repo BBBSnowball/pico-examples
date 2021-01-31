@@ -56,7 +56,8 @@ void rmii_rx_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t 
 
 #define TXMON_PIN_BASE TX0
 #define TXMON_PIN_COUNT 8 // must include all TX pins and CLK, i.e. 3 to 9, must probably be a power of 2
-#define TXMON_N_SAMPLES 2048
+#define TXMON_N_SAMPLES 80 //2048
+#define TXMON_WAIT 0
 
 void txmon_init(PIO pio, uint sm) {
     uint pin_base = TXMON_PIN_BASE;
@@ -65,14 +66,16 @@ void txmon_init(PIO pio, uint sm) {
     // Load a program to capture n pins. This is just a single `in pins, n`
     // instruction with a wrap.
     uint16_t capture_prog_instr[] = {
+#if TXMON_WAIT
       pio_encode_wait_gpio(true, TX_EN),
       pio_encode_wait_gpio(false, CLK),
       pio_encode_wait_gpio(true,  CLK),
+#endif
       pio_encode_in(pio_pins, pin_count),
     };
     struct pio_program capture_prog = {
             .instructions = capture_prog_instr,
-            .length = 4,
+            .length = TXMON_WAIT ? 4 : 1,
             .origin = -1
     };
     uint offset = pio_add_program(pio, &capture_prog);
@@ -82,7 +85,7 @@ void txmon_init(PIO pio, uint sm) {
     // with autopush enabled.
     pio_sm_config c = pio_get_default_sm_config();
     sm_config_set_in_pins(&c, pin_base);
-    sm_config_set_wrap(&c, offset+3, offset+3);
+    sm_config_set_wrap(&c, offset+capture_prog.length-1, offset+capture_prog.length-1);
     sm_config_set_clkdiv(&c, 1);
     sm_config_set_in_shift(&c, true, true, 32);
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
@@ -105,7 +108,7 @@ void txmon_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t ca
         true                // Start immediately
     );
 
-    pio_sm_set_enabled(pio, sm, true);
+    //pio_sm_set_enabled(pio, sm, true);
 }
 
 void txmon_print_capture_buf(const uint32_t *buf, uint pin_base, uint pin_count, uint32_t n_samples) {
@@ -191,7 +194,7 @@ bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
       true                // Start immediately
   );
 
-  pio_sm_set_enabled(pio, sm, true);
+  //pio_sm_set_enabled(pio, sm, true);
 
   // ack previous irq
   //FIXME race condition?
@@ -387,6 +390,8 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
           dma_channel_abort(mon_dma_chan);
           pio_sm_set_enabled(mon_pio, mon_sm, false);
         } else {
+          // pio_sm_set_enabled for tx and txmon statemachines at the same time
+          pio->ctrl |= (1<<sm) | (1<<mon_sm);
           printf("waiting for tx_mon...\r\n");
           dma_channel_wait_for_finish_blocking(mon_dma_chan);
           txmon_print_capture_buf(mon_buf, TXMON_PIN_BASE, TXMON_PIN_COUNT, TXMON_N_SAMPLES);

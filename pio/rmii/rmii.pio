@@ -13,6 +13,7 @@
 //     probably run the PIOs at 100 MHz. This will only work for RMII
 //     and the MCU must be clocked by a crystal that is precise enough.
 //FIXME implement that, as well ^^
+//FIXME pins 20 and 22 can be used as clock inputs -> another way of doing this?
 
 .define public CLK 9
 .define public CRS 8
