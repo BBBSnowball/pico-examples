@@ -14,6 +14,7 @@
 // frequency.
 
 #include <stdio.h>
+#include <string.h>
 
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
@@ -474,9 +475,10 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         struct _frame* tx = (struct _frame*)(tx_data + tx_frame_preface_length);
         memcpy(tx, frame_data, frame_len);
         memcpy(tx->dmac, tx->smac, 6);
-        memcpy(tx->smac, our_mac, 6);
+        //memcpy(tx->smac, our_mac, 6);
+        memcpy(tx->smac, ipframe->dmac, 6);
         tx->dst = tx->src;
-        tx->src = our_ip;
+        tx->src = ipframe->dst; //our_ip
         tx->icmp_type = 0; // echo reply
 
         struct ip_hdr* iphdr = (struct ip_hdr*)&tx->version_ihl;
@@ -486,7 +488,6 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         struct icmp_echo_hdr* icmphdr = (struct icmp_echo_hdr *)&tx->icmp_type;
         icmphdr->chksum = 0;
         icmphdr->chksum = inet_chksum(icmphdr, frame_len - ((uint8_t*)icmphdr - (uint8_t*)tx) - 4);
-        printf("icmp chksum, length: %d - %d - 4 = %d\r\n", frame_len, ((uint8_t*)icmphdr - (uint8_t*)tx), frame_len - ((uint8_t*)icmphdr - (uint8_t*)tx) - 4);
 
         calc_fcs(tx_data + tx_frame_preface_length, frame_len, true);
         calc_fcs(tx_data + tx_frame_preface_length, frame_len, false);
