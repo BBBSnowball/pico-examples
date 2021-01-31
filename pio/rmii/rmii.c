@@ -27,9 +27,11 @@
 
 #include "rmii.pio.h"
 
+#include "netif/ethernet.h"
 #include "lwip/src/include/lwip/prot/ip4.h"
 #include "lwip/inet_chksum.h"
 #include "lwip/icmp.h"
+#include "lwip/src/include/lwip/prot/etharp.h"
 
 #include "zlib/zlib.h"
 
@@ -419,29 +421,25 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
     bool fcs_valid = calc_fcs(frame_data, frame_len, false);
 
     struct _frame {
-      uint8_t dmac[6], smac[6];
-      uint16_t ether_type;
-      uint8_t version_ihl;
-      uint8_t dscp_ecn;
-      uint16_t total_length;
-      uint16_t identification;
-      uint16_t flags_fragment;
-      uint8_t ttl;
-      uint8_t protocol;
-      uint16_t header_checksum;
-      uint32_t src, dst;
-      uint8_t icmp_type, icmp_code;
-      uint16_t icmp_checksum;
-    } __attribute__((packed)) *ipframe = (struct _frame*)frame_data;
+      struct eth_hdr eth;
+      struct ip_hdr ipv4;
+      union {
+        struct icmp_echo_hdr icmp_echo;
+        struct etharp_hdr arp;
+      };
+    } __attribute__((packed)) *rxframe = (struct _frame*)(frame_data - ETH_PAD_SIZE);
+
+    uint8_t our_mac[6] = { 0x02, 0x43, 0x32, 0xb1, 0x67, 0xa7 }; // locally administered, random
+    uint32_t our_ip = 0x05012a0a; // 10.42.1.5
 
     //NOTE This is recognizing very specific pings. They are generated like this:
     //     ip a add 10.42.1.1/24 dev ens10f0u1u4
     //     ping 10.42.1.255 -bf -I ens10f0u1u4 -s 10  // size can be different
     static uint32_t ok_cnt = 0, err_cnt = 0, ping_cnt = 0, tx_drop = 0;
     //NOTE values are little-endian so swapped here
-    if (fcs_valid && frame_len >= 20 && ipframe->ether_type == 0x0008 && (ipframe->version_ihl&0xf0) == 0x40
-        && !(ipframe->flags_fragment&0x4) && ipframe->protocol == 0x01 && ipframe->dst == 0xff012a0a
-        && ipframe->icmp_type == 8 && ipframe->icmp_code == 0) {
+    if (fcs_valid && frame_len >= 20 && rxframe->eth.type == 0x0008 && IPH_V(&rxframe->ipv4) == 0x4
+        && !(rxframe->ipv4._offset&0x4) && IPH_PROTO(&rxframe->ipv4) == 0x01 && rxframe->ipv4.dest.addr == 0xff012a0a
+        && rxframe->icmp_echo.type == ICMP_ECHO && rxframe->icmp_echo.code == 0) {
       printf("This is a ping.\r\n");
       ok_cnt++;
       ping_cnt++;
@@ -468,24 +466,22 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         txmon_arm(mon_pio, mon_sm, mon_dma_chan, mon_buf, sizeof(mon_buf)/sizeof(*mon_buf));
 #endif
 
-        uint8_t our_mac[6] = { 0x02, 0x43, 0x32, 0xb1, 0x67, 0xa7 }; // locally administered, random
-        uint32_t our_ip = 0x05012a0a; // 10.42.1.5
         //FIXME I think the conversion from uint8_t to uint32_t is only ok for little-endian. Should we check or change that?
         rmii_tx_init_buf((uint32_t*)tx_data, frame_len);
         struct _frame* tx = (struct _frame*)(tx_data + tx_frame_preface_length);
         memcpy(tx, frame_data, frame_len);
-        memcpy(tx->dmac, tx->smac, 6);
-        //memcpy(tx->smac, our_mac, 6);
-        memcpy(tx->smac, ipframe->dmac, 6);
-        tx->dst = tx->src;
-        tx->src = ipframe->dst; //our_ip
-        tx->icmp_type = 0; // echo reply
+        memcpy(&tx->eth.dest, &tx->eth.src, 6);
+        //memcpy(&tx->eth.src, our_mac, 6);
+        memcpy(&tx->eth.src, &rxframe->eth.dest, 6);
+        tx->ipv4.dest = tx->ipv4.src;
+        tx->ipv4.src = rxframe->ipv4.dest; //our_ip
+        tx->icmp_echo.type = ICMP_ER; // echo reply
 
-        struct ip_hdr* iphdr = (struct ip_hdr*)&tx->version_ihl;
+        struct ip_hdr* iphdr = (struct ip_hdr*)&tx->ipv4;
         IPH_CHKSUM_SET(iphdr, 0);
         IPH_CHKSUM_SET(iphdr, inet_chksum(iphdr, 20));
 
-        struct icmp_echo_hdr* icmphdr = (struct icmp_echo_hdr *)&tx->icmp_type;
+        struct icmp_echo_hdr* icmphdr = (struct icmp_echo_hdr *)&tx->icmp_echo;
         icmphdr->chksum = 0;
         icmphdr->chksum = inet_chksum(icmphdr, frame_len - ((uint8_t*)icmphdr - (uint8_t*)tx) - 4);
 
