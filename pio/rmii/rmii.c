@@ -216,6 +216,44 @@ bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
 #pragma GCC diagnostic pop
 #undef main
 
+bool calc_fcs(uint8_t* frame_data, size_t frame_len, bool update) {
+    cm_t cm;
+    p_cm_t p_cm = &cm;
+    memset(p_cm, 0, sizeof(cm));
+
+    p_cm->cm_width  = 32;
+    p_cm->cm_poly   = 0x04C11DB7;
+    p_cm->cm_init   = 0xFFFFFFFF;
+    p_cm->cm_refin  = 1;
+    p_cm->cm_refot  = 1;
+    p_cm->cm_xorot  = 0xFFFFFFFF;
+
+    cm_ini(p_cm);
+
+    uint8_t j;
+    for (j = 0; j < frame_len-4 && j < frame_len; j += 1) {
+      cm_nxt(p_cm, frame_data[j]);
+    }
+
+    uint32_t crc = cm_crc(p_cm) & 0xffffffff;
+    uint32_t frame_fcs = (frame_data[frame_len - 1] << 24) |
+                         (frame_data[frame_len - 2] << 16) |
+                         (frame_data[frame_len - 3] << 8) |
+                          frame_data[frame_len - 4];
+
+    if (!update) {
+        printf("Calculated CRC: 0x%lx, Frame FCS: 0x%lx\n", crc, frame_fcs);
+        (crc == frame_fcs) ? printf("Matched!\n") : printf("Not matched!\n");
+    } else {
+        frame_data[frame_len - 1] = crc >> 24;
+        frame_data[frame_len - 2] = crc >> 16;
+        frame_data[frame_len - 3] = crc >>  8;
+        frame_data[frame_len - 4] = crc;
+    }
+
+    return crc == frame_fcs;
+}
+
 void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) {
     // Display the capture buffer in text form, like this:
     // 00: __--__--__--__--__--__--
@@ -302,32 +340,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
     }
     printf("\r\n");
 
-    cm_t cm;
-    p_cm_t p_cm = &cm;
-    memset(p_cm, 0, sizeof(cm));
-
-    p_cm->cm_width  = 32;
-    p_cm->cm_poly   = 0x04C11DB7;
-    p_cm->cm_init   = 0xFFFFFFFF;
-    p_cm->cm_refin  = 1;
-    p_cm->cm_refot  = 1;
-    p_cm->cm_xorot  = 0xFFFFFFFF;
-
-    cm_ini(p_cm);
-
-    uint8_t j;
-    for (j = 0; j < frame_len-4 && j < frame_len; j += 1) {
-      cm_nxt(p_cm, frame_data[j]);
-    }
-
-    uint32_t crc = cm_crc(p_cm) & 0xffffffff;
-    uint32_t frame_fcs = (frame_data[frame_len - 1] << 24) |
-                         (frame_data[frame_len - 2] << 16) |
-                         (frame_data[frame_len - 3] << 8) |
-                          frame_data[frame_len - 4];
-
-    printf("Calculated CRC: 0x%lx, Frame FCS: 0x%lx\n", crc, frame_fcs);
-    (crc == frame_fcs) ? printf("Matched!\n") : printf("Not matched!\n");
+    bool fcs_valid = calc_fcs(frame_data, frame_len, false);
 
     struct _frame {
       uint8_t dmac[6], smac[6];
@@ -350,7 +363,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
     //     ping 10.42.1.255 -bf -I ens10f0u1u4 -s 10  // size can be different
     static uint32_t ok_cnt = 0, err_cnt = 0, ping_cnt = 0, tx_drop = 0;
     //NOTE values are little-endian so swapped here
-    if (crc == frame_fcs && frame_len >= 20 && ipframe->ether_type == 0x0008 && (ipframe->version_ihl&0xf0) == 0x40
+    if (fcs_valid && frame_len >= 20 && ipframe->ether_type == 0x0008 && (ipframe->version_ihl&0xf0) == 0x40
         && !(ipframe->flags_fragment&0x4) && ipframe->protocol == 0x01 && ipframe->dst == 0xff012a0a
         && ipframe->icmp_type == 8 && ipframe->icmp_code == 0) {
       printf("This is a ping.\r\n");
@@ -377,15 +390,18 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
         uint32_t our_ip = 0x05012a0a; // 10.42.1.5
         //FIXME I think the conversion from uint8_t to uint32_t is only ok for little-endian. Should we check or change that?
         rmii_tx_init_buf((uint32_t*)tx_data, frame_len);
-        //struct _frame* tx = (struct _frame*)(tx_data + tx_frame_preface_length);
-        //memcpy(tx, frame_data, frame_len);
-        //memcpy(tx->dmac, tx->smac, 6);
-        //memcpy(tx->smac, our_mac, 6);
-        //tx->dst = tx->src;
-        //tx->src = our_ip;
-        //tx->icmp_type = 0; // echo reply
+        struct _frame* tx = (struct _frame*)(tx_data + tx_frame_preface_length);
+        memcpy(tx, frame_data, frame_len);
+        memcpy(tx->dmac, tx->smac, 6);
+        memcpy(tx->smac, our_mac, 6);
+        tx->dst = tx->src;
+        tx->src = our_ip;
+        tx->icmp_type = 0; // echo reply
         //FIXME header checksum for IP and ICMP
-        //FIXME FCS
+
+        calc_fcs(tx_data + tx_frame_preface_length, frame_len, true);
+        calc_fcs(tx_data + tx_frame_preface_length, frame_len, false);
+
         // ethtool -K ens10f0u1u4 rx off tx off
         // tcpdump -i ens10f0u1u4 --direction=in
         // ethtool --statistics ens10f0u1u4
@@ -446,7 +462,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
           while (1);
         }
       }
-    } else if (crc == frame_fcs) {
+    } else if (fcs_valid) {
       ok_cnt++;
     } else {
       err_cnt++;
