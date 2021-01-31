@@ -390,6 +390,23 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
           dma_channel_abort(mon_dma_chan);
           pio_sm_set_enabled(mon_pio, mon_sm, false);
         } else {
+          // sanity test: can the txmon see pin changes that we do in the tx sm?
+          printf("DBG_PADOE:  %08lx\r\n", pio->dbg_padoe);
+          printf("DBG_PADOUT: %08lx\r\n", pio->dbg_padout);
+          pio_sm_exec(mon_pio, mon_sm, pio_encode_set(pio_x, 0x05));
+          pio_sm_exec(mon_pio, mon_sm, pio_encode_in(pio_x, 32));
+          printf("txmon: x=5: %08lx\r\n", pio->rxf[mon_sm]);
+          pio_sm_exec(mon_pio, mon_sm, pio_encode_in(pio_pins, 32));
+          printf("txmon: pins=%08lx\r\n", pio->rxf[mon_sm]);
+
+          for (int j=0; j<32; j++) {
+            pio_sm_exec(pio, sm, pio_encode_set(pio_pins, j));
+            pio_sm_exec(mon_pio, mon_sm, pio_encode_in(pio_pins, 32));
+            printf("txmon: pins=%08lx (set by tx: %02x), DBG_PADOUT=%08lx\r\n", pio->rxf[mon_sm], j, pio->dbg_padout);
+          }
+
+          while (1);
+
           // pio_sm_set_enabled for tx and txmon statemachines at the same time
           pio->ctrl |= (1<<sm) | (1<<mon_sm);
           printf("waiting for tx_mon...\r\n");
