@@ -29,6 +29,11 @@
 const uint CAPTURE_PIN_COUNT = 4;
 const uint CAPTURE_N_SAMPLES = 2048; //96;
 
+//const uint CLK = 9;
+const uint TX_EN = 5;
+const uint TX0 = 3;
+const uint TX1 = TX0 + 1;
+
 void rmii_rx_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t capture_size_words) {
     pio_sm_set_enabled(pio, sm, false);
     pio_sm_clear_fifos(pio, sm);
@@ -48,9 +53,85 @@ void rmii_rx_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t 
     pio_sm_set_enabled(pio, sm, true);
 }
 
+// Frame starts with length and preamble
+//const static size_t tx_frame_preface_length = (32 + 8*8)/8;
+#define tx_frame_preface_length ((32 + 8*8)/8)
+
+// tx_buf must contain tx_frame_preface_length+frame_length bytes, rounded up to whole uint32_t
+void rmii_tx_init_buf(uint32_t* tx_buf, size_t frame_length) {
+  // transaction count: four clocks per octet
+  tx_buf[0] = (frame_length + tx_frame_preface_length) * 4;
+  // preamble and SFD
+  tx_buf[1] = 0x55555555;
+  tx_buf[2] = 0xd5555555;
+  // clear last word - not strictly necessary as the bits after the frame
+  // shouldn't be used by the PIO
+  tx_buf[frame_length/4] = 0;
+}
+
+static inline bool pio_sm_is_enabled(PIO pio, uint sm) {
+  return !!(pio->ctrl & (1<<sm));
+}
+
+bool rmii_tx_can_send(PIO pio, uint sm, uint dma_chan) {
+  //FIXME replace by pio->xx
+  intptr_t PIO_BASE = pio == pio0 ? PIO0_BASE : PIO1_BASE;
+  volatile uint32_t* PIO_IRQ = (volatile uint32_t*)(PIO_BASE + 0x30);
+
+  if (!pio_sm_is_enabled(pio, sm)) {
+    return true;
+  } else {
+    if (!(*PIO_IRQ & 0x2))
+      // IRQ1 is not asserted -> PIO is still busy
+      return false;
+  }
+}
+
+bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
+  intptr_t PIO_BASE = pio == pio0 ? PIO0_BASE : PIO1_BASE;
+  volatile uint32_t* PIO_IRQ = (volatile uint32_t*)(PIO_BASE + 0x30);
+
+  if (!pio_sm_is_enabled(pio, sm)) {
+    //FIXME move init code out of here
+    uint offset = pio_add_program(pio, &rmii_tx_program);
+    rmii_tx_program_init(pio, sm, offset, CLK, TX_EN, TX0);
+  
+    pio_sm_set_enabled(pio, sm, false);
+  } else {
+    if (!(*PIO_IRQ & 0x2))
+      // IRQ1 is not asserted -> PIO is still busy
+      return false;
+  }
+
+  pio_sm_clear_fifos(pio, sm);
+
+  dma_channel_config c = dma_channel_get_default_config(dma_chan);
+  channel_config_set_read_increment(&c, true);
+  channel_config_set_write_increment(&c, false);
+  channel_config_set_dreq(&c, pio_get_dreq(pio, sm, true));
+
+  dma_channel_configure(dma_chan, &c,
+      &pio->txf[sm],      // Destinatinon pointer
+      tx_buf,             // Source pointer
+      (tx_buf[0]+15)/16,  // Number of transfers
+      true                // Start immediately
+  );
+
+  pio_sm_set_enabled(pio, sm, true);
+
+  // ack previous irq
+  //FIXME race condition?
+  *PIO_IRQ = 0x2;
+
+  return true;
+}
+
 #define main x
 #define SCNx8 "c"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat"
 #include "Ethernet-CRC32/crc32.c"
+#pragma GCC diagnostic pop
 #undef main
 
 void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) {
@@ -163,7 +244,7 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
                          (frame_data[frame_len - 3] << 8) |
                           frame_data[frame_len - 4];
 
-    printf("Calculated CRC: 0x%x, Frame FCS: 0x%x\n", crc, frame_fcs);
+    printf("Calculated CRC: 0x%lx, Frame FCS: 0x%lx\n", crc, frame_fcs);
     (crc == frame_fcs) ? printf("Matched!\n") : printf("Not matched!\n");
 
     struct _frame {
@@ -178,21 +259,56 @@ void print_capture_buf(const uint32_t *buf, uint pin_count, uint32_t n_samples) 
       uint8_t protocol;
       uint16_t header_checksum;
       uint32_t src, dst;
+      uint8_t icmp_type, icmp_code;
+      uint16_t icmp_checksum;
     } __attribute__((packed)) *ipframe = (struct _frame*)frame_data;
 
-    static uint32_t ok_cnt = 0, err_cnt = 0, ping_cnt = 0;
+    //NOTE This is recognizing very specific pings. They are generated like this:
+    //     ip a add 10.42.1.1/24 dev ens10f0u1u4
+    //     ping 10.42.1.255 -bf -I ens10f0u1u4 -s 10  // size can be different
+    static uint32_t ok_cnt = 0, err_cnt = 0, ping_cnt = 0, tx_drop = 0;
     //NOTE values are little-endian so swapped here
     if (crc == frame_fcs && frame_len >= 20 && ipframe->ether_type == 0x0008 && (ipframe->version_ihl&0xf0) == 0x40
-        && !(ipframe->flags_fragment&0x4) && ipframe->protocol == 0x01 && ipframe->dst == 0xff012a0a) {
+        && !(ipframe->flags_fragment&0x4) && ipframe->protocol == 0x01 && ipframe->dst == 0xff012a0a
+        && ipframe->icmp_type == 8 && ipframe->icmp_code == 0) {
       printf("This is a ping.\r\n");
       ok_cnt++;
       ping_cnt++;
+
+      PIO pio = pio0;
+      uint sm = 1;
+      uint dma_chan = 1;
+
+      static uint8_t tx_data[1024 + tx_frame_preface_length + 4];
+      if (!rmii_tx_can_send(pio, sm, dma_chan)) {
+        tx_drop++;
+      } else {
+        uint8_t our_mac[6] = { 0x02, 0x43, 0x32, 0xb1, 0x67, 0xa7 }; // locally administered, random
+        uint32_t our_ip = 0x05012a0a; // 10.42.1.5
+        //FIXME I think the conversion from uint8_t to uint32_t is only ok for little-endian. Should we check or change that?
+        rmii_tx_init_buf((uint32_t*)tx_data, frame_len);
+        struct _frame* tx = (struct _frame*)(tx_data + tx_frame_preface_length);
+        memcpy(tx, frame_data, frame_len);
+        memcpy(tx->dmac, tx->smac, 6);
+        memcpy(tx->smac, our_mac, 6);
+        tx->dst = tx->src;
+        tx->src = our_ip;
+        tx->icmp_type = 0; // echo reply
+        //FIXME header checksum for IP and ICMP
+        //FIXME FCS
+        // ethtool -K ens10f0u1u4 rx off tx off
+        // tcpdump -i ens10f0u1u4 --direction=in
+        // ethtool --statistics ens10f0u1u4
+        // ethtool --phy-statistics ens10f0u1u4
+        if (!rmii_tx_send(pio, sm, dma_chan, (uint32_t*)tx_data))
+          tx_drop++;
+      }
     } else if (crc == frame_fcs) {
       ok_cnt++;
     } else {
       err_cnt++;
     }
-    printf("ok=%lu, err=%lu, pings=%lu\r\n", ok_cnt, err_cnt, ping_cnt);
+    printf("ok=%lu, err=%lu, pings=%lu, tx_drops=%lu\r\n", ok_cnt, err_cnt, ping_cnt, tx_drop);
 }
 
 void init_clock() {
@@ -427,7 +543,7 @@ int main() {
 
       dma_channel_abort(dma_chan);
 
-      printf("FDEBUG: %08x\r\n", *PIO0_FDEBUG);
+      printf("FDEBUG: %08lx\r\n", *PIO0_FDEBUG);
   
       print_capture_buf(capture_buf, CAPTURE_PIN_COUNT, n_samples);
     }

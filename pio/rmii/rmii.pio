@@ -1,3 +1,19 @@
+//NOTE The clock is sourced by the MAC for RMII so there isn't any
+//     need for an async clock. However, the PHY breakout board
+//     already has an oscillator and I want to try making it work
+//     without any modifications to the board. Furthermore, other
+//     variants of MII need an async clock for RX anyway.
+//
+//     We are running the PIOs (and the processor) at 250 MHz to
+//     have enough oversampling to synchronize to the external
+//     clock.
+//
+//     That being said, we could disable the oscillator on the PHY
+//     board and generate the clock with side sets. That way, we can
+//     probably run the PIOs at 100 MHz. This will only work for RMII
+//     and the MCU must be clocked by a crystal that is precise enough.
+//FIXME implement that, as well ^^
+
 .define public CLK 9
 .define public CRS 8
 .define public RX1 7
@@ -36,6 +52,43 @@ repeat:
     irq wait 0
 .wrap
 
+//FIXME for rx, try this:
+// - omit CRS and CLK in ISR
+// - do the "in null, 4" in software and look at FIFO status to find out which of them saturates the counter
+// - that way, we know how many bits we have sampled.
+// - This may be off-by-one because RX is sampled by `in` and CRS is sampled by `jmp`.
+//   Let's assume that the PHY is always giving us whole nibbles.
+// - This is not true in case of RX_ERRs. We have to rely on the CRC to detect errors.
+
+//FIXME use relative pin numbers - only RX0/1 and TX0/1 pairs need to be next to each other
+
+// TX0/1 connect to outputs
+// CLK via GPIO
+// TX_EN via side-set
+
+.program rmii_tx
+.side_set 1 opt  //FIXME we could make this not optional
+start:
+    pull
+    mov y, osr
+.wrap_target
+    // Timing is a bit tricky: We may change the data at any point except near the
+    // rising edge. However, there is some delay involved before we see the edge and
+    // react to it.
+    //FIXME compare error rates for different offsets
+    //wait 0 pin 0
+    wait 0 gpio CLK
+    jmp y-- done
+    //wait 1 pin 0
+    wait 1 gpio CLK
+    out pins, 2 side 1
+.wrap
+done:
+    //wait 1 pin 0
+    wait 1 gpio CLK
+    irq wait 1 side 0
+    jmp start
+
 % c-sdk {
 void rmii_rx_program_init(PIO pio, uint sm, uint offset) {
    pio_gpio_init(pio, RX0);
@@ -50,5 +103,27 @@ void rmii_rx_program_init(PIO pio, uint sm, uint offset) {
    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
    pio_sm_init(pio, sm, offset, &c);
    pio_sm_set_clkdiv_int_frac(pio, sm, 1, 0);
+}
+
+void rmii_tx_program_init(PIO pio, uint sm, uint offset, uint clk, uint tx_en, uint tx0) {
+  uint tx1 = tx0+1;
+  pio_gpio_init(pio, clk);
+  pio_gpio_init(pio, tx_en);
+  pio_gpio_init(pio, tx0);
+  pio_gpio_init(pio, tx1);
+  pio_sm_set_pins_with_mask(pio, sm, 0, (1<<tx_en) | (1<<tx0) | (1<<tx1));
+  pio_sm_set_consecutive_pindirs(pio, sm, clk, 1, false);
+  pio_sm_set_consecutive_pindirs(pio, sm, tx_en, 1, true);
+  pio_sm_set_consecutive_pindirs(pio, sm, tx0, 2, true);
+
+  pio_sm_config c = rmii_tx_program_get_default_config(offset);
+  sm_config_set_in_pins(&c, clk);
+  sm_config_set_out_pins(&c, tx0, 2);
+  sm_config_set_out_shift(&c, true, true, 32);
+  sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+  sm_config_set_sideset(&c, 1, true, false);
+  sm_config_set_sideset_pins(&c, tx_en);
+  pio_sm_init(pio, sm, offset, &c);
+  pio_sm_set_clkdiv_int_frac(pio, sm, 1, 0);
 }
 %}
