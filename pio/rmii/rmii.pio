@@ -72,13 +72,7 @@ repeat:
 start:
     pull block  // no-op if full because of auto-pull
     mov y, osr
-    //pull block
     out null, 32  // get next word
-    //set y, 8
-    //set x, 0x15
-    //mov osr, x
-    set pins, 3
-    set pins, 1
 
 .wrap_target
     // Timing is a bit tricky: We may change the data at any point except near the

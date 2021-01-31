@@ -193,9 +193,11 @@ bool rmii_tx_send(PIO pio, uint sm, uint dma_chan, uint32_t* tx_buf) {
   dma_channel_configure(dma_chan, &c,
       &pio->txf[sm],      // Destinatinon pointer
       tx_buf,             // Source pointer
-      (tx_buf[0]+15)/16,  // Number of transfers
+      (tx_buf[0]+15)/16+1,// Number of transfers
       true                // Start immediately
   );
+
+  printf("number of dma transfers: %lu+1 for %lu clocks plus cnt\r\n", (tx_buf[0]+15)/16, tx_buf[0]);
 
   //pio_sm_set_enabled(pio, sm, true);
 
