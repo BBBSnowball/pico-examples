@@ -1,3 +1,6 @@
 [submodule "pio/rmii/Ethernet-CRC32"]
 	path = pio/rmii/Ethernet-CRC32
 	url = https://github.com/jwbensley/Ethernet-CRC32
+[submodule "pio/rmii/lwip"]
+	path = pio/rmii/lwip
+	url = https://git.savannah.nongnu.org/git/lwip.git
