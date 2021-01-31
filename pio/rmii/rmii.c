@@ -111,6 +111,8 @@ void txmon_arm(PIO pio, uint sm, uint dma_chan, uint32_t *capture_buf, size_t ca
     //pio_sm_set_enabled(pio, sm, true);
 }
 
+bool calc_fcs(uint8_t* frame_data, size_t frame_len, bool update);
+
 void txmon_print_capture_buf(const uint32_t *buf, uint pin_base, uint pin_count, uint32_t n_samples) {
     // Display the capture buffer in text form, like this:
     // 00: __--__--__--__--__--__--
@@ -129,6 +131,90 @@ void txmon_print_capture_buf(const uint32_t *buf, uint pin_base, uint pin_count,
            printf("\n");
        }
     }
+
+
+    enum { begin, preamble, frame, end, error } state = begin;
+    state = begin;
+    static uint8_t frame_data[1024];
+    uint32_t frame_len = 0;
+    int bitcnt = 0;
+    int bitcnt2 = 0;
+    uint8_t d2 = 0;
+    uint8_t d = 0xff;
+    for (int sample = 0; sample < n_samples && state != end && state != error; sample+=4) {
+      uint32_t dnext = buf[sample/4];
+      for (int i = 0; i < 4; i++) {
+        if ((dnext & (1<<6)) && !(d & (1<<6))) {
+          // rising edge of clock
+        } else {
+          d = dnext;
+          dnext >>= 8;
+          continue;
+        }
+        if (!(d & 0x4)) {
+          if (state < frame && (d & 0x7) == 0x0) {
+            // DV=0 in or before preamble is ok-ish
+            state = begin;
+          } else {
+            state = end;
+            printf("eof\r\n");
+            break;
+          }
+        }
+        switch (state) {
+          case begin:
+            if ((d & 0x3) == 0)
+              ;
+            else if ((d & 0x3) == 1)
+              state = preamble;
+            else
+              state = error;
+            break;
+          case preamble:
+            if ((d & 0x3) == 1)
+              ;
+            else if ((d & 0x3) == 3)
+              state = frame;
+            else
+              state = error;
+            break;
+          case frame:
+            d2 |= (d & 0x3) << bitcnt;
+            bitcnt += 2;
+            bitcnt2 += 2;
+            if (bitcnt == 8) {
+              frame_data[frame_len++] = d2;
+              bitcnt = 0;
+              d2 = 0;
+            }
+            break;
+          case end:
+          case error:
+            printf("state=%d\r\n", state);
+            break;
+        }
+        printf("%d: %1lx -> %d\r\n", sample+i, d&0xf, state);
+        if (state == frame && bitcnt2 > 0 && bitcnt == 0)
+          printf("  byte %ld: %08x\r\n", frame_len-1, frame_data[frame_len-1]);
+
+        d = dnext;
+        dnext >>= 8;
+      }
+    }
+
+    if (state == error)
+      printf("state=error\r\n");
+    printf("frame, len=%lu + %d bits, %d bits: ", frame_len, bitcnt, bitcnt2);
+    for (int i=0; i<frame_len; i++) {
+      if ((i % 16) == 0)
+        printf("\r\n");
+      printf(" %02x", frame_data[i]);
+    }
+    printf("\r\n");
+
+    bool fcs_valid = calc_fcs(frame_data, frame_len, false);
+
+
 }
 
 
